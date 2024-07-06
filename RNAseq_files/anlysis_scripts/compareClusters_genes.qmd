@@ -1,0 +1,227 @@
+---
+title: compare_cluster
+subtitle: Una prueba de concepto
+author: Álvaro Martínez Martínez
+date: today
+format:
+  html: 
+    embed-resources: true
+    scrollable: true
+    echo: true
+    theme: zephyr
+    toc: true
+crossref: 
+  title-delim: "."
+lang: es
+page-layout: article
+number-sections: true
+---
+
+Cargamos los archivos necesarios antes de hacer nada.
+
+```{r}
+#| label: load_everything
+#| echo: false
+#| message: false
+library(edgeR)
+library(Biobase)
+library(PCAtools)
+library(NOISeq)
+library(plotly)
+library(knitr)
+library(dplyr)
+
+load(file="C13_noiseq.rda")
+```
+
+
+# Comparar los Cluster de los resultados
+
+Lo primero es cargar clusterProfiler con la base de datos de E. coli
+
+```{r}
+#| label: load_cp
+library(clusterProfiler)
+library(enrichplot)
+library(GOSemSim)
+library(org.EcK12.eg.db)
+```
+
+A partir de aquí, en teoría el nuevo `eSet` lo puedo leer como un `DGEList`,
+y el resto de código que había usado en el pasado se puede reutilizar sin
+mayor problema (no hay que normalizar los conteos porque ese paso ya lo he
+hecho con `NOISeq`).
+
+```{r}
+#| label: make_dge
+dge = DGEList(counts = exprs(C13.eSet.noise), group = pData(C13.eSet.noise)$condicion)
+```
+
+Nos ahorraremos las vueltas que di en el anterior informe, y voy a pasar
+directamente a comparar cada Cas activa con su control correspondiente:
+
+# Cas13 activas
+
+Vale, el contraste así será (Cas + gRNA - Cas sin gRNA).
+
+```{r}
+#| label: Cas_better_fit
+new.dge <- dge[,grep("A(1|3|4|5|6|7|8|9|10)_",colnames(dge$counts))]
+# Model matrix with the interesting samples
+new.mm <- model.matrix(~ 0 + new.dge$samples$group)
+colnames(new.mm) <- levels(new.dge$samples$group)
+# Estimate commondisp and do the fit
+new.dge <- estimateCommonDisp(new.dge)
+fit.new <- glmFit(new.dge, design = new.mm)
+# Define contrasts and make LRT
+new.con = makeContrasts(conLWa = LWa_gRNA - LWa_empty, 
+                              conRX = RX_gRNA - RX_empty,
+                              conLbu = Lbu_gRNA - Lbu_empty,
+                              coneLbu = eLbu_gRNA - eLbu_empty,
+                              levels = new.mm)
+
+lrt1.new <- glmLRT(fit.new, contrast = new.con[,"conLWa"])
+tt1.new <- topTags(lrt1.new, n=nrow(new.dge$counts))
+sum(tt1.new$table$FDR <= .05)
+lrt2.new <- glmLRT(fit.new, contrast = new.con[,"conRX"])
+tt2.new <- topTags(lrt2.new, n=nrow(new.dge$counts))
+sum(tt2.new$table$FDR <= .05)
+lrt3.new <- glmLRT(fit.new, contrast = new.con[,"conLbu"])
+tt3.new <- topTags(lrt3.new, n=nrow(new.dge$counts))
+sum(tt3.new$table$FDR <= .05)
+lrt4.new <- glmLRT(fit.new, contrast = new.con[,"coneLbu"])
+tt4.new <- topTags(lrt4.new, n=nrow(new.dge$counts))
+sum(tt4.new$table$FDR <= .05)
+```
+
+## GSEAs alive con CompareCluster
+
+Estooo, esto es justo lo que queríamos
+
+```{r}
+#| label: load_godata
+load("GOSem.rda")
+```
+
+```{r}
+#| label: gsea_cc
+stat1 <- ifelse(tt1.new$table$logFC < 0, log10(tt1.new$table$PValue), -log10(tt1.new$table$PValue))
+names(stat1) <- rownames(tt1.new)
+stat1 <- sort(stat1, decreasing = TRUE)
+
+stat2 <- ifelse(tt2.new$table$logFC < 0, log10(tt2.new$table$PValue), -log10(tt2.new$table$PValue))
+names(stat2) <- rownames(tt2.new)
+stat2 <- sort(stat2, decreasing = TRUE)
+
+stat3 <- ifelse(tt3.new$table$logFC < 0, log10(tt3.new$table$PValue), -log10(tt3.new$table$PValue))
+names(stat3) <- rownames(tt3.new)
+stat3 <- sort(stat3, decreasing = TRUE)
+
+stat4 <- ifelse(tt4.new$table$logFC < 0, log10(tt4.new$table$PValue), -log10(tt4.new$table$PValue))
+names(stat4) <- rownames(tt4.new)
+stat4 <- sort(stat4, decreasing = TRUE)
+
+alive <- list(Lwa = stat1, Rfx = stat2, Lbu = stat3, eLbu = stat4)
+alive.res <- compareCluster(alive, fun = "gseGO",
+               ont = "BP",
+               OrgDb = org.EcK12.eg.db,
+               keyType = 'SYMBOL',
+               verbose = T,
+               minGSSize = 10,
+               maxGSSize = 500,
+               pvalueCutoff = .05,
+               pAdjustMethod = "BH",
+               seed = T)
+alive.res <- simplify(alive.res, cutoff = 0.5, semData = go.sem)
+dotplot(alive.res, showCategory = 100)
+treeplot(pairwise_termsim(alive.res, semData = go.sem), showCategory = 100, offset = rel(2),
+         offset_tiplab = rel(2), nWords = 3)
+```
+
+Bien, esto funciona, así que vamos a guardar el resultado de compareClusters:
+
+```{r}
+#| label: save_compClust
+save(alive.res, file = "CC_alive.rda")
+```
+
+# Dead Cas
+
+Ahora, es tan solo repetir el análisis con las muertas
+
+```{r}
+#| label: edgeR_w_dead
+dead.dge <- dge[,grep("A(1|11|12|13|14|15|16|17|18)_",colnames(dge$counts))]
+# Model matrix with the interesting samples
+dead.mm <- model.matrix(~ 0 + dead.dge$samples$group)
+colnames(dead.mm) <- levels(dead.dge$samples$group)
+# Estimate commondisp and do the fit
+dead.dge <- estimateCommonDisp(dead.dge)
+fit.dead <- glmFit(dead.dge, design = dead.mm)
+# Define contrasts and make LRT
+dead.con = makeContrasts(conLWa = dLWa_gRNA - dLWa_empty, 
+                              conRX = dRX_gRNA - dRX_empty,
+                              conLbu = dLbu_gRNA - dLbu_empty,
+                              coneLbu = deLbu_gRNA - deLbu_empty,
+                              levels = dead.mm)
+
+lrt1.dead <- glmLRT(fit.dead, contrast = dead.con[,"conLWa"])
+tt1.dead <- topTags(lrt1.dead, n=nrow(dead.dge$counts))
+sum(tt1.dead$table$FDR <= .05)
+lrt2.dead <- glmLRT(fit.dead, contrast = dead.con[,"conRX"])
+tt2.dead <- topTags(lrt2.dead, n=nrow(dead.dge$counts))
+sum(tt2.dead$table$FDR <= .05)
+lrt3.dead <- glmLRT(fit.dead, contrast = dead.con[,"conLbu"])
+tt3.dead <- topTags(lrt3.dead, n=nrow(dead.dge$counts))
+sum(tt3.dead$table$FDR <= .05)
+lrt4.dead <- glmLRT(fit.dead, contrast = dead.con[,"coneLbu"])
+tt4.dead <- topTags(lrt4.dead, n=nrow(dead.dge$counts))
+sum(tt4.dead$table$FDR <= .05)
+```
+
+## GSEAs dead con clusterProfiler
+
+Para el GSEA usaré como estadístico de contraste el logFC por el log10 del p-val
+
+```{r}
+#| label: gsea_dead
+stat1.d <- tt1.dead$table$logFC * -log10(tt1.dead$table$PValue)
+names(stat1.d) <- rownames(tt1.dead)
+stat1.d <- sort(stat1.d, decreasing = TRUE)
+
+stat2.d <- tt2.dead$table$logFC * -log10(tt2.dead$table$PValue)
+names(stat2.d) <- rownames(tt2.dead)
+stat2.d <- sort(stat2.d, decreasing = TRUE)
+
+stat3.d <- tt3.dead$table$logFC * -log10(tt3.dead$table$PValue)
+names(stat3.d) <- rownames(tt3.dead)
+stat3.d <- sort(stat3.d, decreasing = TRUE)
+
+stat4.d <- tt4.dead$table$logFC * -log10(tt4.dead$table$PValue)
+names(stat4.d) <- rownames(tt4.dead)
+stat4.d <- sort(stat4.d, decreasing = TRUE)
+
+dead <- list(dLwa = stat1.d, dRfx = stat2.d, dLbu = stat3.d, deLbu = stat4.d)
+dead.res <- compareCluster(dead, fun = "gseGO",
+               ont = "BP",
+               OrgDb = org.EcK12.eg.db,
+               keyType = 'SYMBOL',
+               verbose = T,
+               minGSSize = 10,
+               maxGSSize = 500,
+               pvalueCutoff = .05,
+               pAdjustMethod = "BH",
+               seed = T)
+dead.res <- simplify(dead.res, cutoff = 0.5, semData = go.sem)
+dotplot(dead.res, showCategory = 100)
+treeplot(pairwise_termsim(dead.res, semData = go.sem), showCategory = 100, offset = rel(2),
+         offset_tiplab = rel(2), nWords = 3)
+```
+
+
+Y guardamos el resultado:
+
+```{r}
+#| label: save_compClust_dead
+save(dead.res, file = "CC_dead.rda")
+```
